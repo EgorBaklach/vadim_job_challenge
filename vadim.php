@@ -1,23 +1,40 @@
 <?php
 
-# Калькулятор выходной цены из расчета наценок поставщиков.
+# Калькулятор выходной цены из расчета наценок поставщиков
+
+final class Definition
+{
+    private array $methods = [];
+
+    public function __construct(private mixed $service){}
+
+    public function bindExecute(string $method, ...$params): self
+    {
+        $this->methods[$method] = $params; return $this;
+    }
+
+    public function __invoke(): mixed
+    {
+        if($this->service instanceof Closure) $this->service = call_user_func($this->service);
+
+        if(is_object($this->service)) foreach($this->methods as $method => $params) $this->service->{$method}(...$params);
+
+        return $this->service;
+    }
+}
 
 final class ServiceLocator
 {
     private static array $services = [];
 
-    public static function register(string $name, mixed $service): void
+    public static function register(string $name, mixed $service): Definition
     {
-        self::$services[$name] ??= $service;
+        return self::$services[$name] ??= new Definition($service);
     }
 
     public static function get(string $name): mixed
     {
-        if(!array_key_exists($name, self::$services)) throw new RuntimeException("Service $name is not included");
-
-        if(self::$services[$name] instanceof Closure) self::$services[$name] = call_user_func(self::$services[$name]);
-
-        return self::$services[$name];
+        if(!array_key_exists($name, self::$services)) throw new RuntimeException("Service $name is not included"); return call_user_func(self::$services[$name]);
     }
 }
 
@@ -26,11 +43,44 @@ final class Supplier
     /** @var float[] */
     private array $prices = [];
 
-    public function __construct(public readonly int $id, public readonly array $rules = [], public readonly ?float $discountless_markup = null){}
+    /** @var array[] */
+    private array $rules = [];
 
-    public function __invoke(Product $product, $price): self
+    public function __construct(public readonly int $id, public readonly ?float $discountless_markup = null){}
+
+    public function setRules(...$rules): void
     {
-        $this->prices[$product->id] ??= $price; return $this;
+        foreach($rules as $rule)
+        {
+            [$min, $max, $markup] = array_pad($rule, 3, null);
+
+            # Если не указано максимально допустимое значение в диапазоне
+            if(is_null($markup))
+            {
+                $markup = $max; $max = PHP_INT_MAX;
+            }
+
+            # Проверяем значения по диапазону на тип данных
+            foreach(compact('min', 'max', 'markup') as $name => $value) if(!is_int($value)) throw new TypeError(ucfirst($name)." value is not integer");
+
+            # Выбрасываем исключение если Минимальная цена указана больше чем Максимальная
+            if($min > $max) throw new LogicException("Min price must not exceed the Max price");
+
+            $this->rules[] = [$min, $max, $markup];
+        }
+
+        # Отсортируем правила от наибольшей наценки до наименьшей DESC
+        usort($this->rules, fn($p, $n) => array_pop($n) <=> array_pop($p));
+    }
+
+    public function setPrice(int $pid, $price): self
+    {
+        $this->prices[$pid] ??= $price; return $this;
+    }
+
+    public function getRules(): array
+    {
+        return $this->rules;
     }
 
     public function prices(): array
@@ -38,7 +88,7 @@ final class Supplier
         return $this->prices;
     }
 
-    public function price(int $id): float
+    public function getPrice(int $id): float
     {
         return $this->prices[$id];
     }
@@ -51,9 +101,9 @@ final class Product
 
     public function __construct(public readonly int $id, public readonly bool $discountless = false){}
 
-    public function __invoke(array $suppliers = []): self
+    public function invoices(array $suppliers = []): self
     {
-        foreach($suppliers as $name => $price) $this->suppliers[] = ServiceLocator::get($name)($this, $price); return $this;
+        foreach($suppliers as $name => $price) $this->suppliers[] = ServiceLocator::get($name)->setPrice($this->id, $price); return $this;
     }
 
     public function suppliers(): array
@@ -74,24 +124,13 @@ final class Calculator
 
     public function __invoke(Product $product, Supplier $supplier): array
     {
-        $price = $supplier->price($product->id); $callback = fn(int $markup) => compact('markup') + ['supplier_id' => $supplier->id, 'rawPrice' => $price, 'convertPrice' => $price + $price * $markup / 100];
+        $price = $supplier->getPrice($product->id); $callback = fn(int $markup) => compact('markup') + ['supplier_id' => $supplier->id, 'rawPrice' => $price, 'convertPrice' => $price + $price * $markup / 100];
 
         # Если у товара отключен учет скидок
         if($product->discountless) return $callback($supplier->discountless_markup ?? self::def_markup);
 
         # Основной расчет наценки по диапазонам
-        foreach($supplier->rules as $rule)
-        {
-            [$min, $max, $markup] = array_pad($rule, 3, null);
-
-            # Если не указано максимально допустимое значение в диапазоне.
-            if(is_null($markup))
-            {
-                $markup = $max; $max = PHP_INT_MAX;
-            }
-
-            if($price > $min && $max > $price) return $callback($markup);
-        }
+        foreach($supplier->getRules() as [$min, $max, $markup]) if($price > $min && $max > $price) return $callback($markup);
 
         # Если цена не попала ни в один диапазон
         return $callback(self::def_markup);
@@ -107,20 +146,45 @@ try
     # Создаем пул Поставщиков
 
     # * Поставщик с Вашими диапазонами
-    ServiceLocator::register('supplier_1', fn() => new Supplier(1, [[1000, 5000, 30], [0, 500, 45], [10000, 20], [5000, 8000, 25]], 50));
+    ServiceLocator::register('supplier_1', fn() => new Supplier(1, 50))->bindExecute('setRules', [1000, 5000, 30], [0, 500, 45], [10000, 20], [5000, 8000, 25]);
 
     # * Старые поставщики
-    ServiceLocator::register('supplier_2', fn() => new Supplier(2, [[0, 499, 45], [500, 999, 40], [1000, 4999, 35]], 30));
-    ServiceLocator::register('supplier_3', fn() => new Supplier(3, [[0, 999, 35], [1000, 9999, 30]]));
+    ServiceLocator::register('supplier_2', fn() => new Supplier(2, 30))->bindExecute('setRules', [0, 499, 45], [500, 999, 40], [1000, 4999, 35]);
+    ServiceLocator::register('supplier_3', fn() => new Supplier(3))->bindExecute('setRules', [0, 999, 35], [1000, 9999, 30]);
     ServiceLocator::register('supplier_4', fn() => new Supplier(4));
 
     # Описываем создание товара с входящими ценами поставщиков
 
-    ServiceLocator::register('product_101', fn() => call_user_func(new Product(101), ['supplier_1' => 1200, 'supplier_2' => 1050, 'supplier_3' => 1010, 'supplier_4' => 600]));
+    ServiceLocator::register('product_101', fn() => new Product(101))->bindExecute('invoices', ['supplier_1' => 1200, 'supplier_2' => 1050, 'supplier_3' => 1010, 'supplier_4' => 600]);
+
+    print_r(ServiceLocator::get('supplier_1')->getRules());
+
+    /* Array (
+        [0] => Array (
+            [0] => 0
+            [1] => 500
+            [2] => 45
+        )
+        [1] => Array (
+            [0] => 1000
+            [1] => 5000
+            [2] => 30
+        )
+        [2] => Array (
+            [0] => 5000
+            [1] => 8000
+            [2] => 25
+        )
+        [3] => Array (
+            [0] => 10000
+            [1] => 9223372036854775807
+            [2] => 20
+        )
+    )*/
 
     print_r(ServiceLocator::get('product_101')->prices());
 
-    /*Array(
+    /** Array(
         [0] => Array (
             [markup] => 30
             [supplier_id] => 1
@@ -149,7 +213,7 @@ try
 }
 catch (Throwable $e)
 {
-    echo "Ошибка: " . $e->getMessage();
+    die($e);
 }
 
 # SQL запрос
