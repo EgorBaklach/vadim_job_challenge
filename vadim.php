@@ -69,16 +69,31 @@ final class Product
 
 final class Calculator
 {
+    /** Наценка по умолчанию */
     private const def_markup = 25;
 
     public function __invoke(Product $product, Supplier $supplier): array
     {
-        $price = $supplier->price($product->id); $callback = fn(int $markup) => compact('markup') + ['rawPrice' => $price, 'convertPrice' => $price + $price * $markup / 100];
+        $price = $supplier->price($product->id); $callback = fn(int $markup) => compact('markup') + ['supplier_id' => $supplier->id, 'rawPrice' => $price, 'convertPrice' => $price + $price * $markup / 100];
 
+        # Если у товара отключен учет скидок
         if($product->discountless) return $callback($supplier->discountless_markup ?? self::def_markup);
 
-        foreach($supplier->rules as $max => $value) if($max >= $price) return $callback($value);
+        # Основной расчет наценки по диапазонам
+        foreach($supplier->rules as $rule)
+        {
+            [$min, $max, $markup] = array_pad($rule, 3, null);
 
+            # Если не указано максимально допустимое значение в диапазоне.
+            if(is_null($markup))
+            {
+                $markup = $max; $max = PHP_INT_MAX;
+            }
+
+            if($price > $min && $max > $price) return $callback($markup);
+        }
+
+        # Если цена не попала ни в один диапазон
         return $callback(self::def_markup);
     }
 }
@@ -91,49 +106,44 @@ try
 
     # Создаем пул Поставщиков
 
-    ServiceLocator::register('supplier_1', fn() => new Supplier(1, [499 => 45, 999 => 40, 4999 => 35], 50));
-    ServiceLocator::register('supplier_2', fn() => new Supplier(2, [999 => 30, 9999 => 25]));
-    ServiceLocator::register('supplier_3', fn() => new Supplier(3));
+    # * Поставщик с Вашими диапазонами
+    ServiceLocator::register('supplier_1', fn() => new Supplier(1, [[1000, 5000, 30], [0, 500, 45], [10000, 20], [5000, 8000, 25]], 50));
+
+    # * Старые поставщики
+    ServiceLocator::register('supplier_2', fn() => new Supplier(2, [[0, 499, 45], [500, 999, 40], [1000, 4999, 35]], 30));
+    ServiceLocator::register('supplier_3', fn() => new Supplier(3, [[0, 999, 35], [1000, 9999, 30]]));
+    ServiceLocator::register('supplier_4', fn() => new Supplier(4));
 
     # Описываем создание товара с входящими ценами поставщиков
 
-    ServiceLocator::register('product_101', fn() => call_user_func(new Product(101), ['supplier_1' => 450, 'supplier_2' => 1000, 'supplier_3' => 600]));
-    ServiceLocator::register('product_102', fn() => call_user_func(new Product(102, true), ['supplier_1' => 600, 'supplier_3' => 800]));
-
-    # Выводим цены поставщиков для товаров 101 и 102
+    ServiceLocator::register('product_101', fn() => call_user_func(new Product(101), ['supplier_1' => 1200, 'supplier_2' => 1050, 'supplier_3' => 1010, 'supplier_4' => 600]));
 
     print_r(ServiceLocator::get('product_101')->prices());
 
-    /** Array (
+    /*Array(
         [0] => Array (
-            [markup] => 45
-            [rawPrice] => 450
-            [convertPrice] => 652.5
+            [markup] => 30
+            [supplier_id] => 1
+            [rawPrice] => 1200
+            [convertPrice] => 1560
         )
         [1] => Array (
-            [markup] => 25
-            [rawPrice] => 1000
-            [convertPrice] => 1250
+            [markup] => 35
+            [supplier_id] => 2
+            [rawPrice] => 1050
+            [convertPrice] => 1417.5
         )
         [2] => Array (
+            [markup] => 30
+            [supplier_id] => 3
+            [rawPrice] => 1010
+            [convertPrice] => 1313
+        )
+        [3] => Array (
             [markup] => 25
+            [supplier_id] => 4
             [rawPrice] => 600
             [convertPrice] => 750
-        )
-    )*/
-
-    print_r(ServiceLocator::get('product_102')->prices());
-
-    /** Array (
-        [0] => Array (
-            [markup] => 50
-            [rawPrice] => 600
-            [convertPrice] => 900
-        )
-        [1] => Array (
-            [markup] => 25
-            [rawPrice] => 800
-            [convertPrice] => 1000
         )
     )*/
 }
