@@ -38,39 +38,52 @@ final class ServiceLocator
     }
 }
 
+/**
+ * @property int $min
+ * @property int $max
+ * @property int $markup
+ */
+final class Rule
+{
+    private int $min;
+    private int $max;
+    private ?int $markup;
+
+    public function __construct(public int $id, ...$rule)
+    {
+        [$this->min, $this->max, $this->markup] = array_pad($rule, 3, null);
+
+        # Если не указано максимально допустимое значение в диапазоне
+        if(is_null($this->markup))
+        {
+            $this->markup = $this->max; $this->max = PHP_INT_MAX;
+        }
+
+        if($this->min > $this->max) throw new LogicException("Min price must not exceed the Max price");
+    }
+
+    public function __get(string $name): mixed
+    {
+        return $this->{$name};
+    }
+}
+
 final class Supplier
 {
     /** @var float[] */
     private array $prices = [];
 
-    /** @var array[] */
+    /** @var Rule[] */
     private array $rules = [];
 
     public function __construct(public readonly int $id, public readonly ?float $discountless_markup = null){}
 
     public function setRules(...$rules): void
     {
-        foreach($rules as $rule)
-        {
-            [$min, $max, $markup] = array_pad($rule, 3, null);
-
-            # Если не указано максимально допустимое значение в диапазоне
-            if(is_null($markup))
-            {
-                $markup = $max; $max = PHP_INT_MAX;
-            }
-
-            # Проверяем значения по диапазону на тип данных
-            foreach(compact('min', 'max', 'markup') as $name => $value) if(!is_int($value)) throw new TypeError(ucfirst($name)." value is not integer");
-
-            # Выбрасываем исключение если Минимальная цена указана больше чем Максимальная
-            if($min > $max) throw new LogicException("Min price must not exceed the Max price");
-
-            $this->rules[] = [$min, $max, $markup];
-        }
+        foreach($rules as $rule) $this->rules[] = ServiceLocator::get($rule);
 
         # Отсортируем правила от наибольшей наценки до наименьшей DESC
-        usort($this->rules, fn($p, $n) => array_pop($n) <=> array_pop($p));
+        usort($this->rules, fn(Rule $p, Rule $n) => $n->markup <=> $p->markup);
     }
 
     public function setPrice(int $pid, $price): self
@@ -130,7 +143,7 @@ final class Calculator
         if($product->discountless) return $callback($supplier->discountless_markup ?? self::def_markup);
 
         # Основной расчет наценки по диапазонам
-        foreach($supplier->getRules() as [$min, $max, $markup]) if($price > $min && $max > $price) return $callback($markup);
+        foreach($supplier->getRules() as $rule) if($price > $rule->min && $rule->max > $price) return $callback($rule->markup);
 
         # Если цена не попала ни в один диапазон
         return $callback(self::def_markup);
@@ -143,14 +156,26 @@ try
 
     ServiceLocator::register(Calculator::class, fn() => new Calculator());
 
+    # Создаем пул Правил наценок - Диапазонов цен
+
+    ServiceLocator::register('rule_1', fn() => new Rule(1, 1000, 5000, 30)); // От 1000 до 5000 наценка = 30%
+    ServiceLocator::register('rule_2', fn() => new Rule(2, 0, 500, 45)); // От 0 до 500 наценка = 45%
+    ServiceLocator::register('rule_3', fn() => new Rule(3, 10000, 20)); // От 10000 и до максимально допустимого INT = 20%
+    ServiceLocator::register('rule_4', fn() => new Rule(4, 5000, 8000, 25)); // От 5000 до 8000 = 25%
+
+    ServiceLocator::register('rule_5', fn() => new Rule(5, 0, 499, 45));
+    ServiceLocator::register('rule_6', fn() => new Rule(6, 500, 999, 40));
+
+    ServiceLocator::register('rule_7', fn() => new Rule(7, 0, 999, 35));
+
     # Создаем пул Поставщиков
 
     # * Поставщик с Вашими диапазонами
-    ServiceLocator::register('supplier_1', fn() => new Supplier(1, 50))->bindExecute('setRules', [1000, 5000, 30], [0, 500, 45], [10000, 20], [5000, 8000, 25]);
+    ServiceLocator::register('supplier_1', fn() => new Supplier(1, 50))->bindExecute('setRules', 'rule_1', 'rule_2', 'rule_3', 'rule_4');
 
     # * Старые поставщики
-    ServiceLocator::register('supplier_2', fn() => new Supplier(2, 30))->bindExecute('setRules', [0, 499, 45], [500, 999, 40], [1000, 4999, 35]);
-    ServiceLocator::register('supplier_3', fn() => new Supplier(3))->bindExecute('setRules', [0, 999, 35], [1000, 9999, 30]);
+    ServiceLocator::register('supplier_2', fn() => new Supplier(2, 30))->bindExecute('setRules', 'rule_5', 'rule_6', 'rule_1');
+    ServiceLocator::register('supplier_3', fn() => new Supplier(3))->bindExecute('setRules', 'rule_7');
     ServiceLocator::register('supplier_4', fn() => new Supplier(4));
 
     # Описываем создание товара с входящими ценами поставщиков
@@ -160,31 +185,35 @@ try
     print_r(ServiceLocator::get('supplier_1')->getRules());
 
     /* Array (
-        [0] => Array (
-            [0] => 0
-            [1] => 500
-            [2] => 45
+        [0] => Rule Object (
+            [min:Rule:private] => 0
+            [max:Rule:private] => 500
+            [markup:Rule:private] => 45
+            [id] => 2
         )
-        [1] => Array (
-            [0] => 1000
-            [1] => 5000
-            [2] => 30
+        [1] => Rule Object (
+            [min:Rule:private] => 1000
+            [max:Rule:private] => 5000
+            [markup:Rule:private] => 30
+            [id] => 1
         )
-        [2] => Array (
-            [0] => 5000
-            [1] => 8000
-            [2] => 25
+        [2] => Rule Object (
+            [min:Rule:private] => 5000
+            [max:Rule:private] => 8000
+            [markup:Rule:private] => 25
+            [id] => 4
         )
-        [3] => Array (
-            [0] => 10000
-            [1] => 9223372036854775807
-            [2] => 20
+        [3] => Rule Object (
+            [min:Rule:private] => 10000
+            [max:Rule:private] => 9223372036854775807
+            [markup:Rule:private] => 20
+            [id] => 3
         )
     )*/
 
     print_r(ServiceLocator::get('product_101')->prices());
 
-    /** Array(
+    /* Array (
         [0] => Array (
             [markup] => 30
             [supplier_id] => 1
@@ -192,16 +221,16 @@ try
             [convertPrice] => 1560
         )
         [1] => Array (
-            [markup] => 35
+            [markup] => 30
             [supplier_id] => 2
             [rawPrice] => 1050
-            [convertPrice] => 1417.5
+            [convertPrice] => 1365
         )
         [2] => Array (
-            [markup] => 30
+            [markup] => 25
             [supplier_id] => 3
             [rawPrice] => 1010
-            [convertPrice] => 1313
+            [convertPrice] => 1262.5
         )
         [3] => Array (
             [markup] => 25
