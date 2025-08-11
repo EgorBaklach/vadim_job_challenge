@@ -40,13 +40,13 @@ final class ServiceLocator
 
 /**
  * @property int $min
- * @property int $max
+ * @property int|null $max
  * @property int $markup
  */
 final class Rule
 {
     private int $min;
-    private int $max;
+    private ?int $max;
     private ?int $markup;
 
     public function __construct(public int $id, ...$rule)
@@ -56,10 +56,10 @@ final class Rule
         # Если не указано максимально допустимое значение в диапазоне
         if(is_null($this->markup))
         {
-            $this->markup = $this->max; $this->max = PHP_INT_MAX;
+            $this->markup = $this->max; $this->max = null;
         }
 
-        if($this->min > $this->max) throw new LogicException("Min price must not exceed the Max price");
+        if($this->max > 0 && $this->min > $this->max) throw new LogicException("Min price must not exceed Max price");
     }
 
     public function __get(string $name): mixed
@@ -81,9 +81,6 @@ final class Supplier
     public function setRules(...$rules): void
     {
         foreach($rules as $rule) $this->rules[] = ServiceLocator::get($rule);
-
-        # Отсортируем правила от наибольшей наценки до наименьшей DESC
-        usort($this->rules, fn(Rule $p, Rule $n) => $n->markup <=> $p->markup);
     }
 
     public function setPrice(int $pid, $price): self
@@ -143,7 +140,15 @@ final class Calculator
         if($product->discountless) return $callback($supplier->discountless_markup ?? self::def_markup);
 
         # Основной расчет наценки по диапазонам
-        foreach($supplier->getRules() as $rule) if($price > $rule->min && $rule->max > $price) return $callback($rule->markup);
+        foreach($supplier->getRules() as $rule)
+        {
+            if($price > $rule->min) # Первый шаг входа - Если цена больше минимально установленной стоимости в диапазоне
+            {
+                if($rule->max > 0 && $price >= $rule->max) continue; # Пропускаем - Если максимальная цена установлена, но цена товара больше
+
+                return $callback($rule->markup); # Когда все совпало - цена товара находится в диапазоне. Она больше минимальной и меньше максимальной, либо максимальная цена не указана
+            }
+        }
 
         # Если цена не попала ни в один диапазон
         return $callback(self::def_markup);
@@ -186,28 +191,28 @@ try
 
     /* Array (
         [0] => Rule Object (
-            [min:Rule:private] => 0
-            [max:Rule:private] => 500
-            [markup:Rule:private] => 45
-            [id] => 2
-        )
-        [1] => Rule Object (
             [min:Rule:private] => 1000
             [max:Rule:private] => 5000
             [markup:Rule:private] => 30
             [id] => 1
         )
+        [1] => Rule Object (
+            [min:Rule:private] => 0
+            [max:Rule:private] => 500
+            [markup:Rule:private] => 45
+            [id] => 2
+        )
         [2] => Rule Object (
+            [min:Rule:private] => 10000
+            [max:Rule:private] =>
+            [markup:Rule:private] => 20
+            [id] => 3
+        )
+        [3] => Rule Object (
             [min:Rule:private] => 5000
             [max:Rule:private] => 8000
             [markup:Rule:private] => 25
             [id] => 4
-        )
-        [3] => Rule Object (
-            [min:Rule:private] => 10000
-            [max:Rule:private] => 9223372036854775807
-            [markup:Rule:private] => 20
-            [id] => 3
         )
     )*/
 
@@ -257,13 +262,24 @@ try
         PDO::MYSQL_ATTR_INIT_COMMAND => 'SET NAMES utf8mb4'
     ]);
 
+    # Пример запроса на вывод данных по одному товару
+
     $values = [
         'section' => ['Concept car', PDO::PARAM_STR],
         'manufacturer' => ['Hot Wheels', PDO::PARAM_STR],
         'scale' => ['1:64', PDO::PARAM_STR]
     ];
 
-    $statement = $pdo->prepare("SELECT `products`.`id` as `id`, `products`.`name` as `name` FROM `products`
+    $statement = $pdo->prepare("SELECT 
+    
+    `products`.`id` as `id`,  
+    `products`.`name` as `name`,
+    
+    `sections`.`name` as `section`, # наименование раздела
+    `manufacturers`.`name` as `manufacturer`, # наименование производителя
+    `scales`.`value` as `scale` # площадь
+    
+    FROM `products`
     
     # Таблица `ps` содержит записи \"многие ко многим\" - чтобы можно было указать несколько категорий для одного товара и несколько товаров для одной категории,
     # При этом чтобы сохранить целостность у таблицы установлен составной уникальный индекс UNIQUE (`pid`,`sid`)  
@@ -288,6 +304,43 @@ try
         [0] => Array (
             [id] => 1
             [name] => Baja Truck No.33, orange
+            [section] => Concept car
+            [manufacturer] => Hot Wheels
+            [scale] => 1:64
+        )
+    )*/
+
+    # Пример запроса на вывод нескольких разделов по одному товару: "Baja Truck No.33%"
+
+    $name = 'Baja Truck No.33%';
+
+    $statement = $pdo->prepare("SELECT 
+    
+    `products`.`id` as `id`,  
+    `products`.`name` as `name`,
+    
+    GROUP_CONCAT(`sections`.`name`  SEPARATOR ', ') AS `sections`
+    
+    FROM `products`
+    
+    JOIN `ps` on `products`.`id`=`ps`.`pid`
+    JOIN `sections` on `ps`.`sid`=`sections`.`id`
+    
+    WHERE `products`.`name` LIKE :name
+    
+    GROUP BY `products`.`id`;");
+
+    $statement->bindParam('name', $name);
+
+    $statement->execute();
+
+    print_r($statement->fetchAll());
+
+    /** Array (
+        [0] => Array (
+            [id] => 1
+            [name] => Baja Truck No.33, orange
+            [sections] => Concept car, Автоспорт
         )
     )*/
 }
